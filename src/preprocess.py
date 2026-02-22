@@ -129,13 +129,21 @@ def preprocess(input_path: str, output_path: str) -> None:
 
     # ---- Remove price outliers (IQR method) ----------------------------------
     before = len(df)
-    q1 = df["price"].quantile(0.01)
-    q3 = df["price"].quantile(0.99)
+    
+    # First, remove clearly invalid prices (less than 500,000 LKR ~ $1,500 USD)
+    # No house in Sri Lanka costs less than this
+    df = df[df["price"] >= 500_000].copy()
+    log.info("Removed %d rows with price < 500,000 LKR", before - len(df))
+    
+    # Apply IQR-based outlier removal on remaining data
+    before = len(df)
+    q1 = df["price"].quantile(0.05)
+    q3 = df["price"].quantile(0.95)
     iqr = q3 - q1
     lower = q1 - 1.5 * iqr
     upper = q3 + 1.5 * iqr
-    df = df[(df["price"] >= max(lower, 0)) & (df["price"] <= upper)].copy()
-    log.info("Outlier removal: %d -> %d rows (removed %d)",
+    df = df[(df["price"] >= max(lower, 500_000)) & (df["price"] <= upper)].copy()
+    log.info("Outlier removal (IQR): %d -> %d rows (removed %d)",
              before, len(df), before - len(df))
 
     # Also remove rows with price <= 0
@@ -143,6 +151,35 @@ def preprocess(input_path: str, output_path: str) -> None:
 
     # ---- Remove rows with 0 bedrooms (likely data errors) --------------------
     df = df[df["bedrooms"] > 0].copy()
+
+    # ---- Feature Engineering -------------------------------------------------
+    log.info("Creating engineered features...")
+    
+    # Total rooms
+    df["total_rooms"] = df["bedrooms"] + df["bathrooms"]
+    
+    # Bathroom to bedroom ratio (luxury indicator)
+    df["bath_bed_ratio"] = df["bathrooms"] / df["bedrooms"]
+    
+    # House size per bedroom
+    df["sqft_per_bedroom"] = df["house_size_sqft"] / df["bedrooms"]
+    
+    # Land utilization (house size vs land size)
+    # Convert land from perches to sqft (1 perch = 272.25 sqft)
+    df["land_sqft"] = df["land_size_perches"] * 272.25
+    df["land_utilization"] = df["house_size_sqft"] / df["land_sqft"].replace(0, np.nan)
+    df["land_utilization"].fillna(df["land_utilization"].median(), inplace=True)
+    
+    # Is the house considered large? (above median)
+    df["is_large_house"] = (df["house_size_sqft"] > df["house_size_sqft"].median()).astype(int)
+    
+    # Is the land considered large?
+    df["is_large_land"] = (df["land_size_perches"] > df["land_size_perches"].median()).astype(int)
+    
+    # Drop intermediate column
+    df.drop(columns=["land_sqft"], inplace=True)
+    
+    log.info("  Added 6 engineered features")
 
     # ---- Encode categoricals -------------------------------------------------
     encoders = {}

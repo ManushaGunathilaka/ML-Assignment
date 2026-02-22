@@ -98,11 +98,26 @@ def plot_residual_histogram(y_true, y_pred, save_path: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def load_transform_info():
+    """Load transform info to check if log transform was used."""
+    transform_path = os.path.join(DATA_DIR, "models", "transform_info.json")
+    if os.path.exists(transform_path):
+        with open(transform_path) as f:
+            return json.load(f)
+    return {"log_transform": False}
+
+
 def evaluate() -> None:
     log.info("Loading model and data ...")
     model = load_model()
     feature_cols = load_feature_names()
     splits_dir = os.path.join(DATA_DIR, "splits")
+    
+    # Check if log transform was used
+    transform_info = load_transform_info()
+    use_log = transform_info.get("log_transform", False)
+    if use_log:
+        log.info("Model trained with log1p transform - applying expm1 to predictions")
 
     metrics_all = {}
     for split in ("train", "val", "test"):
@@ -110,6 +125,11 @@ def evaluate() -> None:
         X = df[feature_cols]
         y = df["price"]
         preds = model.predict(X)
+        
+        # Convert back from log scale if needed
+        if use_log:
+            preds = np.expm1(preds)
+        
         metrics_all[split] = compute_metrics(y, preds, split)
 
     # Save metrics
@@ -129,6 +149,10 @@ def evaluate() -> None:
     X_test = test_df[feature_cols]
     y_test = test_df["price"]
     y_pred = model.predict(X_test)
+    
+    # Convert back from log scale if needed
+    if use_log:
+        y_pred = np.expm1(y_pred)
 
     plot_predicted_vs_actual(
         y_test, y_pred,

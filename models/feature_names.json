@@ -1,1 +1,1 @@
-["negotiable", "bedrooms", "bathrooms", "city", "district", "house_size_sqft", "land_size_perches"]
+["negotiable", "bedrooms", "bathrooms", "city", "district", "house_size_sqft", "land_size_perches", "total_rooms", "bath_bed_ratio", "sqft_per_bedroom", "land_utilization", "is_large_house", "is_large_land"]
