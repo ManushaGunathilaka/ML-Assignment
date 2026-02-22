@@ -17,6 +17,10 @@ Why Optuna (over RandomizedSearchCV)?
     is smarter than random search: it learns from prior trials to focus on
     promising hyperparameter regions, generally converging faster.
 
+Log Transform:
+    House prices are typically right-skewed. Training on log(price) and 
+    predicting with exp(prediction) often significantly improves R² and RMSE.
+
 Usage:
     python src/train.py --data processed.csv
 """
@@ -47,32 +51,40 @@ log = get_logger("train")
 # Hyperparameter search space
 # ---------------------------------------------------------------------------
 
-def objective(trial, X_train, y_train, X_val, y_val):
-    """Optuna objective: minimise validation RMSE."""
+def objective(trial, X_train, y_train_log, X_val, y_val_log, y_val_orig):
+    """
+    Optuna objective: minimise validation RMSE in original scale.
+    Model is trained on log(price) but evaluated on actual price.
+    """
     params = {
-        "n_estimators":      trial.suggest_int("n_estimators", 200, 1500),
-        "max_depth":         trial.suggest_int("max_depth", 3, 10),
-        "learning_rate":     trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-        "subsample":         trial.suggest_float("subsample", 0.5, 1.0),
-        "colsample_bytree":  trial.suggest_float("colsample_bytree", 0.5, 1.0),
+        "n_estimators":      trial.suggest_int("n_estimators", 300, 2000),
+        "max_depth":         trial.suggest_int("max_depth", 4, 12),
+        "learning_rate":     trial.suggest_float("learning_rate", 0.005, 0.2, log=True),
+        "subsample":         trial.suggest_float("subsample", 0.6, 1.0),
+        "colsample_bytree":  trial.suggest_float("colsample_bytree", 0.6, 1.0),
         "reg_alpha":         trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
         "reg_lambda":        trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
-        "min_child_weight":  trial.suggest_int("min_child_weight", 1, 10),
+        "min_child_weight":  trial.suggest_int("min_child_weight", 1, 20),
+        "gamma":             trial.suggest_float("gamma", 1e-8, 1.0, log=True),
         "random_state":      42,
-        "tree_method":       "hist",      # fast histogram-based algorithm
+        "tree_method":       "hist",
         "verbosity":         0,
     }
 
-    model = xgb.XGBRegressor(**params, early_stopping_rounds=50)
+    model = xgb.XGBRegressor(**params, early_stopping_rounds=100)
 
     model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
+        X_train, y_train_log,
+        eval_set=[(X_val, y_val_log)],
         verbose=False,
     )
 
-    preds = model.predict(X_val)
-    rmse = np.sqrt(mean_squared_error(y_val, preds))
+    # Predict and convert back from log scale
+    preds_log = model.predict(X_val)
+    preds = np.expm1(preds_log)  # expm1 is inverse of log1p
+    
+    # Calculate RMSE in original scale
+    rmse = np.sqrt(mean_squared_error(y_val_orig, preds))
     return rmse
 
 
@@ -80,7 +92,7 @@ def objective(trial, X_train, y_train, X_val, y_val):
 # Training
 # ---------------------------------------------------------------------------
 
-def train(data_path: str, n_trials: int = 50) -> None:
+def train(data_path: str, n_trials: int = 100) -> None:
     # ---- Load splits ---------------------------------------------------------
     splits_dir = os.path.join(DATA_DIR, "splits")
     train_df = pd.read_csv(os.path.join(splits_dir, "train.csv"))
@@ -95,13 +107,21 @@ def train(data_path: str, n_trials: int = 50) -> None:
 
     log.info("Training data:    %d rows x %d features", *X_train.shape)
     log.info("Validation data:  %d rows x %d features", *X_val.shape)
+    
+    # ---- Apply log transform to target ---------------------------------------
+    # log1p is log(1+x) which handles edge cases better
+    y_train_log = np.log1p(y_train)
+    y_val_log = np.log1p(y_val)
+    log.info("Applied log1p transform to target variable")
+    log.info("  Price range: %.0f - %.0f LKR", y_train.min(), y_train.max())
+    log.info("  Log price range: %.2f - %.2f", y_train_log.min(), y_train_log.max())
 
     # ---- Optuna hyperparameter tuning ----------------------------------------
     log.info("Starting Optuna search (%d trials) ...", n_trials)
 
     study = optuna.create_study(direction="minimize", study_name="xgb-house-price")
     study.optimize(
-        lambda trial: objective(trial, X_train, y_train, X_val, y_val),
+        lambda trial: objective(trial, X_train, y_train_log, X_val, y_val_log, y_val),
         n_trials=n_trials,
         show_progress_bar=True,
     )
@@ -115,19 +135,27 @@ def train(data_path: str, n_trials: int = 50) -> None:
     best["tree_method"] = "hist"
     best["verbosity"] = 0
 
-    final_model = xgb.XGBRegressor(**best, early_stopping_rounds=50)
+    final_model = xgb.XGBRegressor(**best, early_stopping_rounds=100)
     final_model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
+        X_train, y_train_log,
+        eval_set=[(X_val, y_val_log)],
         verbose=False,
     )
 
     # ---- Save model ----------------------------------------------------------
     save_model(final_model, MODEL_PATH)
     log.info("Model saved to %s", MODEL_PATH)
+    
+    # Save a flag indicating log transform is used
+    import json
+    transform_info = {"log_transform": True, "transform_type": "log1p"}
+    with open(os.path.join(DATA_DIR, "models", "transform_info.json"), "w") as f:
+        json.dump(transform_info, f)
+    log.info("Saved transform info (log1p)")
 
-    # Quick sanity check
-    val_preds = final_model.predict(X_val)
+    # Quick sanity check (in original scale)
+    val_preds_log = final_model.predict(X_val)
+    val_preds = np.expm1(val_preds_log)
     val_rmse = np.sqrt(mean_squared_error(y_val, val_preds))
     log.info("Final model validation RMSE: {:,.0f} LKR".format(val_rmse))
 

@@ -90,3 +90,12 @@ def save_metrics(metrics: dict, path: str = METRICS_JSON_PATH) -> None:
 def load_metrics(path: str = METRICS_JSON_PATH) -> dict:
     with open(path) as f:
         return json.load(f)
+
+
+def load_transform_info() -> dict:
+    """Load transform info to check if log transform was used during training."""
+    transform_path = os.path.join(MODELS_DIR, "transform_info.json")
+    if os.path.exists(transform_path):
+        with open(transform_path) as f:
+            return json.load(f)
+    return {"log_transform": False}

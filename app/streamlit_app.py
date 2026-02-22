@@ -30,7 +30,7 @@ ROOT_DIR = os.path.abspath(os.path.join(APP_DIR, ".."))
 sys.path.insert(0, ROOT_DIR)
 
 from src.utils import (
-    load_model, load_encoders, load_feature_names, load_metrics,
+    load_model, load_encoders, load_feature_names, load_metrics, load_transform_info,
     PLOTS_DIR, OUTPUTS_DIR, MODELS_DIR,
 )
 
@@ -333,8 +333,13 @@ def main():
     # Build feature row
     X_input = build_features(inputs, encoders, feature_names)
     
-    # Make prediction
-    pred = model.predict(X_input)[0]
+    # Make prediction (apply inverse log transform if model was trained with log)
+    pred_raw = model.predict(X_input)[0]
+    transform_info = load_transform_info()
+    if transform_info.get("log_transform", False):
+        pred = np.expm1(pred_raw)  # inverse of log1p
+    else:
+        pred = pred_raw
 
     # ---- Main Content Area ---------------------------------------------------
     
@@ -423,18 +428,36 @@ def main():
         top_idx = np.argsort(abs_shap)[::-1][:3]
         
         st.markdown("#### 🎯 Top 3 Factors Affecting This Price")
+        
+        # Check if log transform was used - SHAP values are in log scale
+        transform_info = load_transform_info()
+        use_log = transform_info.get("log_transform", False)
+        
         factor_cols = st.columns(3)
         for i, idx in enumerate(top_idx):
             feature = feature_names[idx]
             impact = shap_values[0][idx]
             direction = "📈 Increases" if impact > 0 else "📉 Decreases"
-            with factor_cols[i]:
-                st.metric(
-                    label=feature.replace("_", " ").title(),
-                    value=f"LKR {abs(impact):,.0f}",
-                    delta=direction + " price",
-                    delta_color="normal" if impact > 0 else "inverse"
-                )
+            
+            if use_log:
+                # Convert log-scale SHAP to approximate percentage impact
+                # exp(shap_value) - 1 gives approximate % change
+                pct_impact = (np.exp(abs(impact)) - 1) * 100
+                with factor_cols[i]:
+                    st.metric(
+                        label=feature.replace("_", " ").title(),
+                        value=f"{pct_impact:.1f}%",
+                        delta=direction + " price",
+                        delta_color="normal" if impact > 0 else "inverse"
+                    )
+            else:
+                with factor_cols[i]:
+                    st.metric(
+                        label=feature.replace("_", " ").title(),
+                        value=f"LKR {abs(impact):,.0f}",
+                        delta=direction + " price",
+                        delta_color="normal" if impact > 0 else "inverse"
+                    )
 
     # ---- Tab 2: Model Insights -----------------------------------------------
     with tab2:
